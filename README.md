@@ -1,6 +1,27 @@
 # 自主看盘台 V2
 
-一个在 Windows 本机运行的 A 股行情观察、技术指标学习和确定性条件预警工具。项目只使用 Python 标准库和浏览器原生能力，默认无需付费订阅，也不调用大模型。
+[![Verify](https://github.com/xuanche2830/a-share-market-desk/actions/workflows/verify.yml/badge.svg)](https://github.com/xuanche2830/a-share-market-desk/actions/workflows/verify.yml)
+[![Latest release](https://img.shields.io/github/v/release/xuanche2830/a-share-market-desk?display_name=tag)](https://github.com/xuanche2830/a-share-market-desk/releases/latest)
+
+自主看盘台是一款面向个人投资学习者的 Windows 本地行情观察工具。它通过多数据源降级获取 A 股行情，计算 MA、RSI 和 MACD，并用可解释的确定性规则进行预警和历史回放。项目不连接券商、不自动交易，也不输出收益预测或买卖建议。
+
+项目只使用 Python 标准库和浏览器原生能力，源代码模式无需安装第三方 Python 依赖。Windows x64 用户也可以直接下载便携版，在任意有写权限的目录中解压运行。
+
+## 30 秒了解项目
+
+| 目标 | 实现 |
+|---|---|
+| 低成本看盘 | HiThink Key 可选；无 Key 时自动使用公开行情源 |
+| 可解释预警 | 七类确定性规则、立即试算、交易时段限制和完整审计记录 |
+| 指标学习 | 日 K、MA、RSI、MACD、成交量与通俗口径说明 |
+| 验证规则行为 | 最多 750 根已完成日 K 的无未来数据历史回放 |
+| 本地自主控制 | 状态、规则、缓存和日志均保存在本机，支持备份与迁移 |
+| Windows 交付 | 托盘运行、原生通知、便携 EXE 和无个人数据分享包 |
+| 工程验证 | 58 项单元测试、Python/JavaScript 语法检查和 GitHub Actions |
+
+- [下载最新 Windows x64 便携版](https://github.com/xuanche2830/a-share-market-desk/releases/latest)
+- [查看两分钟演示路径](outputs/演示说明.md)
+- [查看版本记录](CHANGELOG.md)
 
 ![自主看盘台 V2 页面](outputs/dashboard.png)
 
