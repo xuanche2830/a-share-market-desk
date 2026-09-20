@@ -23,7 +23,14 @@
 - [查看两分钟演示路径](outputs/演示说明.md)
 - [查看版本记录](CHANGELOG.md)
 
+![自主看盘台功能导览](outputs/demo.gif)
+
+<details>
+<summary>查看完整静态页面</summary>
+
 ![自主看盘台 V2 页面](outputs/dashboard.png)
+
+</details>
 
 ## 项目边界
 
