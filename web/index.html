@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>自主看盘台</title>
+  <link rel="stylesheet" href="/styles.css?v=20260920a">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">LOCAL MARKET DESK</div>
+      <h1>自主看盘台</h1>
+    </div>
+    <div class="top-actions">
+      <span id="sourceBadge" class="badge">数据源连接中</span>
+      <span id="marketBadge" class="badge">交易时段判断中</span>
+      <span id="updatedAt" class="muted">尚未更新</span>
+      <button id="notificationButton" class="ghost">开启桌面通知</button>
+      <button id="refreshButton" class="primary">立即刷新</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar panel">
+      <div class="panel-title">
+        <div><span>自选股</span><small id="watchCount">0 只</small></div>
+      </div>
+      <form id="addStockForm" class="add-stock">
+        <div class="stock-search-wrap">
+          <input id="stockCode" maxlength="30" placeholder="输入名称、简称、拼音或代码" role="combobox" aria-autocomplete="list" aria-controls="stockSuggestions" aria-expanded="false" autocomplete="off" required>
+          <div id="stockSuggestions" class="stock-suggestions hidden" role="listbox"></div>
+        </div>
+        <button title="添加自选">＋</button>
+      </form>
+      <div class="watch-tools">
+        <select id="watchGroupFilter" aria-label="自选分组"><option value="">全部分组</option></select>
+        <select id="watchSort" aria-label="自选排序"><option value="manual">手动顺序</option><option value="change_desc">涨幅从高到低</option><option value="change_asc">涨幅从低到高</option><option value="name">名称</option></select>
+        <button id="bulkImportButton" class="text-button" type="button">批量导入</button>
+      </div>
+      <div id="watchlist" class="watchlist"></div>
+      <div class="sidebar-settings">
+        <label>数据源
+          <select id="sourceSelect">
+            <option value="auto">自动选择</option>
+            <option value="eastmoney">公开行情</option>
+            <option value="hithink">同花顺官方</option>
+          </select>
+        </label>
+        <label>刷新间隔
+          <select id="intervalSelect">
+            <option value="10">10 秒（开盘推荐）</option>
+            <option value="30">30 秒</option>
+            <option value="60">60 秒</option>
+            <option value="120">2 分钟</option>
+            <option value="300">5 分钟</option>
+          </select>
+        </label>
+        <label class="switch-row"><span>自动刷新</span><input id="autoRefresh" type="checkbox"><i></i></label>
+        <label class="switch-row"><span>启用通知安静时段</span><input id="quietHoursEnabled" type="checkbox"><i></i></label>
+        <div id="quietHoursRow" class="quiet-hours-row">
+          <label>开始<input id="quietStart" type="time" value="15:01"></label>
+          <label>结束<input id="quietEnd" type="time" value="09:29"></label>
+        </div>
+        <small class="setting-note">安静时段内仍保存触发记录，但不弹出系统或浏览器通知。</small>
+        <button id="dataManagerButton" type="button">备份、恢复与导入导出</button>
+      </div>
+    </aside>
+
+    <section class="workspace">
+      <div id="errorBanner" class="error-banner hidden"></div>
+      <section class="health-panel panel" aria-label="数据状态摘要">
+        <div class="health-summary">
+          <div><span>数据状态</span><strong id="dataStatus">加载中</strong></div>
+          <div><span>实际来源</span><strong id="routeSummary">等待连接</strong></div>
+          <div><span>市场状态</span><strong id="marketStatus">判断中</strong></div>
+          <div><span>预警监控</span><strong id="monitorStatus">正在启动</strong></div>
+          <div><span>最近成功</span><strong id="lastSuccess">—</strong></div>
+        </div>
+        <details>
+          <summary>查看数据源健康与口径</summary>
+          <div id="sourceHealthList" class="source-health-list"></div>
+          <div class="health-actions"><button id="sourceTestButton" type="button">测试当前数据路由</button><span id="sourceTestResult" class="muted"></span></div>
+          <p class="health-note"><span id="marketBasis">正在读取交易日历口径。</span> 缓存会明确标识，预警只使用本轮成功取得的实时数据。</p>
+        </details>
+      </section>
+      <section class="quote-head panel">
+        <div>
+          <div class="symbol-line"><h2 id="stockName">选择一只股票</h2><span id="stockSymbol" class="muted"></span></div>
+          <div class="price-line"><strong id="stockPrice">—</strong><span id="stockChange">—</span></div>
+        </div>
+        <div class="quote-grid">
+          <div><span>今开</span><strong id="stockOpen">—</strong></div>
+          <div><span>最高</span><strong id="stockHigh">—</strong></div>
+          <div><span>最低</span><strong id="stockLow">—</strong></div>
+          <div><span>成交额</span><strong id="stockTurnover">—</strong></div>
+        </div>
+      </section>
+
+      <section class="chart-panel panel">
+        <div class="chart-toolbar">
+          <div>
+            <h3>日 K 趋势</h3>
+            <span id="chartMeta" class="muted">前复权 · 等待数据</span>
+          </div>
+          <div class="chart-controls">
+            <select id="chartRange" aria-label="K线显示范围"><option value="60">近 60 日</option><option value="90" selected>近 90 日</option><option value="120">近 120 日</option><option value="250">近 250 日</option></select>
+            <label><input id="showMa" type="checkbox" checked> 均线</label>
+            <label><input id="showMarkers" type="checkbox" checked> 预警标记</label>
+            <button id="resetChart" type="button">重置</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chartCanvas"></canvas>
+          <div id="chartTooltip" class="chart-tooltip hidden"></div>
+        </div>
+        <div class="technical-charts">
+          <section class="mini-chart">
+            <div class="mini-chart-head"><div><strong>RSI(14)</strong><span id="rsiValue">—</span></div><small id="rsiExplain">等待数据</small></div>
+            <canvas id="rsiCanvas"></canvas>
+          </section>
+          <section class="mini-chart">
+            <div class="mini-chart-head"><div><strong>MACD(12,26,9)</strong><span id="macdValue">—</span></div><small id="macdExplain">等待数据</small></div>
+            <canvas id="macdCanvas"></canvas>
+          </section>
+        </div>
+      </section>
+
+      <section class="indicators panel">
+        <div><span>MA5</span><strong id="ma5">—</strong></div>
+        <div><span>MA10</span><strong id="ma10">—</strong></div>
+        <div><span>MA20</span><strong id="ma20">—</strong></div>
+        <div><span>20 日区间</span><strong id="range20">—</strong></div>
+        <div><span>量比（5日）</span><strong id="volumeRatio">—</strong></div>
+      </section>
+      <section class="context-panel panel">
+        <div class="context-head"><div><h3>公司与市场背景</h3><span id="contextMeta" class="muted">等待加载</span></div></div>
+        <div id="marketOverview" class="market-overview"><div class="empty">正在读取大盘指数</div></div>
+        <div id="companyOverview" class="company-overview"><div class="empty">选择股票后显示公司公开信息</div></div>
+        <p class="health-note">行业、地区、估值和市值来自公开数据字段，缺失时显示“—”。这些信息用于理解背景，不构成投资建议。</p>
+      </section>
+      <details class="indicator-guide panel">
+        <summary>指标口径与通俗解释</summary>
+        <div>
+          <p><strong>MA</strong> 是指定交易日收盘价的简单平均，用于描述不同时间尺度的价格位置。</p>
+          <p><strong>RSI(14)</strong> 使用 Wilder 平滑；70/30 只是相对高低区间提示，不等同于买卖信号。</p>
+          <p><strong>MACD</strong> 的 DIF=EMA12−EMA26，DEA 为 DIF 的 EMA9，柱值按 2×(DIF−DEA) 计算。</p>
+          <p>指标只描述历史价格和成交量关系，不预测收益，也不构成投资建议。</p>
+        </div>
+      </details>
+    </section>
+
+    <aside class="rules panel">
+      <div class="tabs">
+        <button class="tab active" data-tab="rules">预警规则</button>
+        <button class="tab" data-tab="records">触发记录 <span id="recordCount"></span></button>
+        <button class="tab" data-tab="audit">审计统计</button>
+      </div>
+
+      <div id="rulesTab" class="tab-page active">
+        <form id="alertForm" class="rule-form">
+          <div class="rule-templates"><span>快速模板</span><button type="button" data-rule-template="rsi_oversold">RSI 超卖</button><button type="button" data-rule-template="macd_golden">MACD 金叉</button><button type="button" data-rule-template="breakout_volume">突破放量</button></div>
+          <label>监测股票<select id="alertSymbol" required></select></label>
+          <label>预警类型
+            <select id="alertType">
+              <option value="price_above">价格高于</option>
+              <option value="price_below">价格低于</option>
+              <option value="ma_cross">均线穿越</option>
+              <option value="breakout">区间突破</option>
+              <option value="volume_surge">成交量放大</option>
+              <option value="rsi_threshold">RSI 区域</option>
+              <option value="macd_cross">MACD 金叉/死叉</option>
+              <option value="breakout_volume">突破并放量</option>
+            </select>
+          </label>
+          <div id="alertParams"></div>
+          <div class="rule-options">
+            <label><input id="oncePerDay" type="checkbox" checked> 每日只提醒一次</label>
+            <label><input id="tradingHoursOnly" type="checkbox" checked> 仅交易时段触发</label>
+            <label>冷却 <input id="cooldown" type="number" min="1" max="1440" value="60"> 分钟</label>
+          </div>
+          <div class="form-actions"><button id="alertSubmit" class="primary wide">添加预警</button><button id="cancelAlertEdit" class="hidden" type="button">取消编辑</button></div>
+          <details class="rule-guide">
+            <summary>这些规则如何工作</summary>
+            <p>价格规则观察最新价；均线、RSI、MACD、突破和成交量规则使用已完成日 K。RSI 在条件由未成立变为成立时提醒，MACD 只在最近两根 K 线间发生金叉或死叉时命中，组合规则要求突破与放量同时成立。规则是确定性条件，不判断涨跌概率。</p>
+          </details>
+        </form>
+        <div class="rule-filters"><select id="alertStockFilter"><option value="">全部股票</option></select><select id="alertTypeFilter"><option value="">全部规则</option></select></div>
+        <div class="section-label">正在观察 <span id="alertFilterSummary"></span></div>
+        <div id="alertList" class="alert-list"></div>
+      </div>
+
+      <div id="recordsTab" class="tab-page">
+        <div class="record-filters">
+          <label>股票<select id="recordStockFilter"><option value="">全部股票</option></select></label>
+          <label>规则<select id="recordRuleFilter"><option value="">全部规则</option></select></label>
+          <label>日期<input id="recordDateFilter" type="date"></label>
+        </div>
+        <div class="records-tools">
+          <span id="recordFilterSummary" class="muted"></span>
+          <div><button id="exportRecords" class="text-button">导出筛选结果 CSV</button><button id="clearRecords" class="text-button danger-text">清空记录</button></div>
+        </div>
+        <div id="recordList" class="record-list"></div>
+      </div>
+      <div id="auditTab" class="tab-page">
+        <div class="record-filters">
+          <label>股票<select id="auditStockFilter"><option value="">全部股票</option></select></label>
+          <label>状态<select id="auditStatusFilter"><option value="">全部状态</option><option value="triggered">已触发</option><option value="triggered_silent">静默触发</option><option value="not_met">未命中</option><option value="condition_met">持续成立</option><option value="skipped_session">时段跳过</option><option value="blocked_daily">每日限制</option><option value="blocked_cooldown">冷却限制</option><option value="source_error">数据源失败</option></select></label>
+        </div>
+        <div class="records-tools"><span id="auditSummary" class="muted">尚未加载</span><div><button id="refreshAudit" class="text-button">刷新</button><button id="clearAudit" class="text-button danger-text">清空明细</button></div></div>
+        <div id="auditStats" class="audit-stats"></div>
+        <div class="section-label">最近检查明细</div>
+        <div id="auditList" class="record-list"></div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <dialog id="watchEditDialog">
+    <form id="watchEditForm" class="dialog-form">
+      <h3>编辑自选股</h3><p id="watchEditName" class="muted"></p>
+      <input id="watchEditSymbol" type="hidden">
+      <label>分组<input id="watchEditGroup" maxlength="30" placeholder="例如：核心观察"></label>
+      <label>备注<textarea id="watchEditNote" maxlength="200" rows="4" placeholder="记录关注原因或观察重点"></textarea></label>
+      <div class="dialog-actions"><button type="button" data-close-dialog="watchEditDialog">取消</button><button class="primary">保存</button></div>
+    </form>
+  </dialog>
+  <dialog id="bulkImportDialog">
+    <form id="bulkImportForm" class="dialog-form">
+      <h3>批量导入自选股</h3><p class="muted">每行或用逗号分隔一个 6 位 A 股代码，最多 50 个。</p>
+      <label>股票代码<textarea id="bulkSymbols" rows="7" placeholder="600519&#10;300750&#10;002594" required></textarea></label>
+      <label>加入分组<input id="bulkGroup" maxlength="30" value="默认"></label>
+      <div class="dialog-actions"><button type="button" data-close-dialog="bulkImportDialog">取消</button><button class="primary">导入</button></div>
+    </form>
+  </dialog>
+  <dialog id="dataManagerDialog">
+    <div class="dialog-form data-manager">
+      <h3>本地数据管理</h3><p class="muted">备份包含自选股、规则、设置和触发记录，不包含 API Key。</p>
+      <div class="data-actions"><button id="createBackupButton" type="button">立即创建备份</button><a class="button-link" href="/api/export" download="自主看盘台数据.json">导出 JSON</a><button id="importStateButton" type="button">导入 JSON</button><input id="importStateFile" class="hidden" type="file" accept="application/json,.json"></div>
+      <div id="backupList" class="backup-list"></div>
+      <div class="dialog-actions"><button type="button" data-close-dialog="dataManagerDialog">关闭</button></div>
+    </div>
+  </dialog>
+  <dialog id="backtestDialog">
+    <div class="dialog-form backtest-dialog">
+      <h3>规则历史回放</h3><p id="backtestTitle" class="muted"></p>
+      <div id="backtestContent"><div class="empty">正在计算</div></div>
+      <div class="dialog-actions"><button type="button" data-close-dialog="backtestDialog">关闭</button></div>
+    </div>
+  </dialog>
+  <script src="/app.js?v=20260920a"></script>
+</body>
+</html>
