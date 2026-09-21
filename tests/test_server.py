@@ -28,6 +28,43 @@ class ServerReliabilityTests(unittest.TestCase):
         self.assertEqual(status["data_location"], "application_folder")
         self.assertFalse(Path(status["log_file"]).is_absolute())
 
+    def test_notification_diagnostic_reports_native_acceptance(self):
+        calls = []
+        try:
+            server.set_native_notification_sender(lambda title, message: calls.append((title, message)) or True)
+            result = server.test_notification_delivery()
+            self.assertTrue(result["delivered"])
+            self.assertEqual(result["channel"], "windows")
+            self.assertIn("通知测试", calls[0][0])
+        finally:
+            server.set_native_notification_sender(None)
+
+    def test_notification_diagnostic_explains_browser_fallback(self):
+        server.set_native_notification_sender(None)
+        result = server.test_notification_delivery()
+        self.assertFalse(result["delivered"])
+        self.assertTrue(result["browser_fallback"])
+        self.assertIn("双击 EXE", result["reason"])
+
+    def test_tray_failure_falls_back_without_stopping_server(self):
+        class FailedTray:
+            failed = "simulated shell failure"
+
+            @staticmethod
+            def start():
+                return False
+
+        original = server.desktop_status()
+        try:
+            self.assertFalse(server.activate_tray(FailedTray()))
+            status = server.desktop_status()
+            self.assertFalse(status["tray_running"])
+            self.assertFalse(status["native_notifications"])
+            self.assertIn("浏览器通知模式", status["tray_error"])
+            self.assertNotIn("simulated", status["tray_error"])
+        finally:
+            server._update_desktop_status(**original)
+
     @unittest.skipUnless(server.IS_WINDOWS, "exclusive port binding is Windows-only")
     def test_local_server_refuses_port_shared_by_another_process(self):
         occupied = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -225,8 +262,16 @@ class ServerReliabilityTests(unittest.TestCase):
         rsi = server.validate_alert({"symbol": "600519", "type": "rsi_threshold", "params": {"direction": "below", "threshold": 30}})
         macd = server.validate_alert({"symbol": "600519", "type": "macd_cross", "params": {"direction": "above"}})
         combined = server.validate_alert({"symbol": "600519", "type": "breakout_volume", "params": {"lookback": 20, "window": 5, "multiple": 2}})
+        trend = server.validate_alert({"symbol": "600519", "type": "trend_state", "params": {"state": "transition_up"}})
+        pattern = server.validate_alert({"symbol": "600519", "type": "candlestick_pattern", "params": {"pattern": "bullish_engulfing"}})
         self.assertEqual(rsi["params"]["period"], 14)
         self.assertEqual(macd["params"]["signal"], 9)
+        self.assertEqual(trend["params"]["state"], "transition_up")
+        self.assertEqual(pattern["params"]["pattern"], "bullish_engulfing")
+        with self.assertRaises(ValueError):
+            server.validate_alert({"symbol": "600519", "type": "trend_state", "params": {"state": "guess"}})
+        with self.assertRaises(ValueError):
+            server.validate_alert({"symbol": "600519", "type": "candlestick_pattern", "params": {"pattern": "magic"}})
         self.assertEqual(combined["params"]["lookback"], 20)
 
     def test_record_filter_and_csv_export(self):

@@ -25,6 +25,9 @@ const app = {
   audit: { items: [], summaries: [], total: 0 },
   company: null,
   market: [],
+  marketBreadth: null,
+  analysis: null,
+  marketAnalysis: null,
   contextLoadedAt: 0,
   busy: false,
   chart: { left: 54, right: 62, top: 18, bottom: 72, volumeHeight: 62, bars: [], visibleCount: 90, offset: 0, dragging: false, dragX: 0 },
@@ -117,7 +120,8 @@ async function loadHealth() {
     const detail = source.last_error ? `错误：${escapeHtml(source.last_error)}${retry}` : source.last_success_at ? `成功：${localTime(source.last_success_at)} · ${source.last_duration_ms ?? "—"} ms` : "尚未请求";
     return `<div class="source-health-item"><strong>${escapeHtml(source.label)} <span class="status-${["disabled", "cooldown"].includes(source.status) ? "idle" : source.status}">${status}</span></strong><span>${detail}</span></div>`;
   }).join("");
-  if (body.configuration_warning) showWarning(body.configuration_warning);
+  if (body.desktop?.tray_error) showWarning(`${body.desktop.tray_error}。后台预警仍会运行；请允许浏览器通知或查看触发记录。`);
+  else if (body.configuration_warning) showWarning(body.configuration_warning);
 }
 
 let toastTimer;
@@ -218,6 +222,7 @@ async function loadHistory(symbol) {
   if (app.selected !== symbol) return;
   app.historyMeta = body;
   app.bars = body.items;
+  app.analysis = body.analysis || null;
   if (app.chart.symbol !== symbol) {
     app.chart.symbol = symbol;
     app.chart.offset = 0;
@@ -227,6 +232,8 @@ async function loadHistory(symbol) {
   $("#chartMeta").textContent = `前复权 · ${body.items.length} 个交易日 · ${sourceText(body.sources)}${body.data_status === "cached" ? " · 缓存" : ""}`;
   if (body.data_status === "cached") showWarning(`历史行情实时请求失败，图表显示 ${localTime(body.cached_at)} 保存的缓存。${body.warning ? ` 原因：${body.warning}` : ""}`);
   renderIndicators();
+  renderAnalysis();
+  rememberAnalysisSignal(symbol, app.analysis);
   drawChart();
   drawIndicatorCharts();
 }
@@ -238,11 +245,24 @@ async function loadContext() {
   const results = await Promise.allSettled(tasks);
   if (results[0].status === "fulfilled") {
     app.market = results[0].value.items || [];
+    app.marketBreadth = results[0].value.breadth || null;
+    app.marketAnalysis = results[0].value.analysis || null;
     const meta = results[0].value;
-    $("#marketOverview").innerHTML = app.market.map((item) => `<div class="market-card"><span>${escapeHtml(item.name)}</span><strong>${fmt(item.price)}</strong><em class="${trendClass(item.change_pct)}">${Number(item.change_pct) >= 0 ? "+" : ""}${fmt(item.change_pct)}%</em></div>`).join("");
-    $("#contextMeta").textContent = `大盘：${meta.data_status === "cached" ? `缓存 ${localTime(meta.cached_at)}` : "腾讯公开行情"}`;
+    $("#marketOverview").innerHTML = app.market.length ? app.market.map((item) => `<div class="market-card"><span>${escapeHtml(item.name)}</span><strong>${fmt(item.price)}</strong><em class="${trendClass(item.change_pct)}">${Number(item.change_pct) >= 0 ? "+" : ""}${fmt(item.change_pct)}%</em></div>`).join("") : `<div class="empty">主要指数暂不可用：${escapeHtml(meta.warning || "上游未返回数据")}</div>`;
+    const breadth = app.marketBreadth;
+    if (breadth?.available) {
+      $("#marketBreadth").innerHTML = `<div class="breadth-card"><span>上涨</span><strong class="up">${breadth.up}</strong></div><div class="breadth-card"><span>下跌</span><strong class="down">${breadth.down}</strong></div><div class="breadth-card"><span>平盘</span><strong>${breadth.flat}</strong></div><div class="breadth-card"><span>上涨占比</span><strong>${fmt(breadth.advance_ratio)}%</strong></div><div class="breadth-note">${escapeHtml(breadth.coverage_note || "范围：沪深两市")}${meta.breadth_status === "cached" ? ` · 缓存 ${localTime(meta.breadth_cached_at)}` : " · 东方财富公开聚合字段"}</div>`;
+    } else {
+      $("#marketBreadth").innerHTML = `<div class="empty">沪深涨跌家数暂不可用：${escapeHtml(breadth?.reason || meta.breadth_warning || "上游未返回数据")}</div>`;
+    }
+    const indexMeta = meta.data_status === "cached" ? `指数缓存 ${localTime(meta.cached_at)}` : meta.data_status === "live" ? "指数：腾讯公开行情" : "指数暂不可用";
+    const breadthMeta = meta.breadth_status === "cached" ? `宽度缓存 ${localTime(meta.breadth_cached_at)}` : meta.breadth_status === "live" ? "宽度：东方财富公开聚合" : "宽度暂不可用";
+    $("#contextMeta").textContent = `${indexMeta} · ${breadthMeta}`;
+    renderMarketPulse();
   } else {
     $("#marketOverview").innerHTML = `<div class="empty">大盘指数暂时不可用：${escapeHtml(results[0].reason.message)}</div>`;
+    $("#marketBreadth").innerHTML = '<div class="empty">沪深涨跌家数暂时不可用</div>';
+    $("#marketPulse").innerHTML = "<strong>市场判断暂时不可用</strong><span>指数快照请求失败</span>";
   }
   if (selected && results[1]?.status === "fulfilled" && app.selected === selected) {
     app.company = results[1].value.item;
@@ -452,6 +472,83 @@ function renderIndicators() {
   else $("#macdExplain").textContent = "DIF 与 DEA 接近";
 }
 
+function rememberAnalysisSignal(symbol, analysis) {
+  if (!symbol || !analysis?.available || !analysis.signature) return;
+  const key = `marketdesk-analysis-${symbol}`;
+  const previous = localStorage.getItem(key);
+  if (previous && previous !== analysis.signature && analysis.attention === "high") {
+    const title = analysis.signals?.[0]?.title || analysis.headline;
+    toast(`${symbol} 出现新的观察信号：${title}`);
+  }
+  localStorage.setItem(key, analysis.signature);
+}
+
+function renderAnalysis() {
+  const analysis = app.analysis;
+  if (!analysis?.available) {
+    $("#analysisMeta").textContent = "等待至少 20 根已完成日K";
+    $("#analysisAttention").textContent = "数据不足";
+    $("#analysisAttention").className = "analysis-badge";
+    $("#analysisTrend").textContent = "—";
+    $("#analysisCandle").textContent = "—";
+    $("#analysisLevels").textContent = "—";
+    $("#analysisReversal").textContent = "—";
+    $("#analysisReversalDetail").textContent = "等待已完成日K";
+    return;
+  }
+  const trend = analysis.trend || {};
+  const candle = analysis.candle || {};
+  const reversal = analysis.reversal || {};
+  const patterns = candle.patterns || [];
+  $("#analysisMeta").textContent = `截至 ${analysis.as_of || "—"} · 已完成日K`;
+  $("#analysisAttention").textContent = analysis.attention === "high" ? "发现观察信号" : "常规观察";
+  $("#analysisAttention").className = `analysis-badge ${analysis.attention === "high" ? "attention" : "ok"}`;
+  $("#analysisTrend").textContent = trend.label || "—";
+  $("#analysisConfidence").textContent = analysis.confidence || "—";
+  $("#analysisCandle").textContent = patterns.length ? patterns.map((item) => item.label).join("、") : candle.label || "—";
+  $("#analysisCandleDetail").textContent = candle.explanation || "—";
+  $("#analysisReversal").textContent = reversal.label || "—";
+  $("#analysisReversalDetail").textContent = [reversal.message, reversal.caveat].filter(Boolean).join("；") || "—";
+  const support = analysis.levels?.support_20;
+  const resistance = analysis.levels?.resistance_20;
+  $("#analysisLevels").textContent = support == null || resistance == null ? "—" : `${fmt(support)} / ${fmt(resistance)}`;
+  $("#analysisSignals").innerHTML = (analysis.signals || []).map((item) => `<article class="analysis-item ${item.severity === "attention" ? "attention" : ""}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.message)}</span></article>`).join("") || '<div class="empty">没有新的边沿信号，继续观察结构</div>';
+  const evidence = [
+    ...(analysis.evidence || []).map((text) => ({ text, kind: "evidence" })),
+    ...(analysis.conflicts || []).map((text) => ({ text, kind: "conflict" })),
+  ];
+  $("#analysisEvidence").innerHTML = evidence.map((item) => `<div class="analysis-line ${item.kind}"><i></i><span>${escapeHtml(item.text)}</span></div>`).join("") || '<div class="empty">暂无足够依据</div>';
+  $("#analysisSuggestions").innerHTML = (analysis.suggestions || []).map((text, index) => `<div class="analysis-line suggestion"><b>${index + 1}</b><span>${escapeHtml(text)}</span></div>`).join("");
+
+  const actions = [];
+  if (["up", "down", "transition_up", "transition_down", "range"].includes(trend.state)) {
+    actions.push(`<button type="button" data-analysis-rule="trend_state" data-analysis-value="${trend.state}">提醒再次进入“${escapeHtml(trend.label)}”</button>`);
+  }
+  const alertPattern = patterns.find((item) => ["doji", "hammer", "shooting_star", "bullish_engulfing", "bearish_engulfing", "long_bullish", "long_bearish"].includes(item.key));
+  if (alertPattern) actions.push(`<button type="button" data-analysis-rule="candlestick_pattern" data-analysis-value="${alertPattern.key}">提醒再次出现“${escapeHtml(alertPattern.label)}”</button>`);
+  $("#analysisActions").innerHTML = actions.join("") || '<span class="muted">当前没有可直接创建的形态预警</span>';
+  $$('[data-analysis-rule]').forEach((button) => button.addEventListener("click", () => prepareAnalysisRule(button.dataset.analysisRule, button.dataset.analysisValue)));
+}
+
+function renderMarketPulse() {
+  const analysis = app.marketAnalysis;
+  if (!analysis?.available) {
+    $("#marketPulse").innerHTML = "<strong>市场判断数据不足</strong><span>当前只覆盖主要指数快照</span>";
+    return;
+  }
+  $("#marketPulse").innerHTML = `<strong>${escapeHtml(analysis.label)}</strong><span>${escapeHtml((analysis.evidence || []).join(" · "))}</span><small>${escapeHtml(analysis.suggestion)}</small>`;
+}
+
+function prepareAnalysisRule(type, value) {
+  $("#alertSymbol").value = app.selected || $("#alertSymbol").value;
+  $("#alertType").value = type;
+  renderAlertParams();
+  const field = $("#alertParams").querySelector(type === "trend_state" ? '[name="state"]' : '[name="pattern"]');
+  if (field) field.value = value;
+  document.querySelector(".rules").scrollIntoView({ behavior: "smooth", block: "start" });
+  toast("已把当前判断填入预警表单，请检查后点击“添加预警”");
+}
+
 function prepareCanvas(selector) {
   const canvas = $(selector);
   const rect = canvas.getBoundingClientRect();
@@ -637,7 +734,11 @@ function renderAlertFormSymbols() {
 const ruleLabels = {
   price_above: "价格高于", price_below: "价格低于", ma_cross: "均线穿越", breakout: "区间突破", volume_surge: "成交量放大",
   rsi_threshold: "RSI 区域", macd_cross: "MACD 金叉/死叉", breakout_volume: "突破并放量",
+  trend_state: "趋势状态", candlestick_pattern: "K线形态",
 };
+
+const trendStateLabels = { up: "上升结构", down: "下降结构", transition_up: "可能转强", transition_down: "可能转弱", range: "震荡整理" };
+const candlestickPatternLabels = { doji: "十字线", long_bullish: "长实体阳线", long_bearish: "长实体阴线", hammer: "锤头形态", shooting_star: "长上影形态", bullish_engulfing: "阳包阴", bearish_engulfing: "阴包阳" };
 
 function renderAlertParams() {
   const type = $("#alertType").value;
@@ -649,6 +750,8 @@ function renderAlertParams() {
   if (type === "rsi_threshold") container.innerHTML = '<div class="param-row"><label>RSI 周期<input name="period" type="number" value="14" min="2" max="60"></label><label>区域<select name="direction"><option value="above">高于阈值 / 进入超买区</option><option value="below">低于阈值 / 进入超卖区</option></select></label></div><div class="param-row single"><label>阈值（常用 70 / 30）<input name="threshold" type="number" value="70" min="1" max="99" step="0.1"></label></div>';
   if (type === "macd_cross") container.innerHTML = '<div class="param-row"><label>短期 EMA<input name="short" type="number" value="12" min="2" max="119"></label><label>长期 EMA<input name="long" type="number" value="26" min="3" max="120"></label></div><div class="param-row"><label>信号期<input name="signal" type="number" value="9" min="2" max="60"></label><label>方向<select name="direction"><option value="above">金叉（DIF 上穿 DEA）</option><option value="below">死叉（DIF 下穿 DEA）</option></select></label></div>';
   if (type === "breakout_volume") container.innerHTML = '<div class="param-row"><label>突破观察（日）<input name="lookback" type="number" value="20" min="2" max="250"></label><label>方向<select name="direction"><option value="high">突破高点</option><option value="low">跌破低点</option></select></label></div><div class="param-row"><label>均量窗口（日）<input name="window" type="number" value="5" min="2" max="60"></label><label>放量倍数<input name="multiple" type="number" value="2" min="1" max="20" step="0.1"></label></div>';
+  if (type === "trend_state") container.innerHTML = '<div class="param-row single"><label>进入状态<select name="state"><option value="up">上升结构</option><option value="down">下降结构</option><option value="transition_up">可能转强</option><option value="transition_down">可能转弱</option><option value="range">震荡整理</option></select></label></div>';
+  if (type === "candlestick_pattern") container.innerHTML = '<div class="param-row single"><label>形态<select name="pattern"><option value="doji">十字线</option><option value="long_bullish">长实体阳线</option><option value="long_bearish">长实体阴线</option><option value="hammer">锤头形态</option><option value="shooting_star">长上影形态</option><option value="bullish_engulfing">阳包阴</option><option value="bearish_engulfing">阴包阳</option></select></label></div>';
   if (type === "rsi_threshold") {
     container.querySelector('[name="direction"]').addEventListener("change", (event) => {
       container.querySelector('[name="threshold"]').value = event.target.value === "below" ? "30" : "70";
@@ -666,6 +769,8 @@ function ruleDescription(rule) {
   if (rule.type === "rsi_threshold") return `RSI(${p.period}) ${p.direction === "above" ? "≥" : "≤"} ${fmt(p.threshold)}`;
   if (rule.type === "macd_cross") return `MACD(${p.short},${p.long},${p.signal}) ${p.direction === "above" ? "金叉" : "死叉"}`;
   if (rule.type === "breakout_volume") return `${p.direction === "high" ? "突破" : "跌破"}前 ${p.lookback} 日，同时成交量 ≥ 前 ${p.window} 日均量 ${p.multiple} 倍`;
+  if (rule.type === "trend_state") return `技术状态进入“${trendStateLabels[p.state] || p.state}”`;
+  if (rule.type === "candlestick_pattern") return `已完成日K出现“${candlestickPatternLabels[p.pattern] || p.pattern}”`;
   return rule.type;
 }
 
@@ -765,6 +870,8 @@ function applyRuleTemplate(name) {
     rsi_oversold: { type: "rsi_threshold", params: { period: 14, direction: "below", threshold: 30 } },
     macd_golden: { type: "macd_cross", params: { short: 12, long: 26, signal: 9, direction: "above" } },
     breakout_volume: { type: "breakout_volume", params: { lookback: 20, direction: "high", window: 5, multiple: 2 } },
+    trend_up: { type: "trend_state", params: { state: "up" } },
+    bullish_engulfing: { type: "candlestick_pattern", params: { pattern: "bullish_engulfing" } },
   };
   const template = templates[name];
   if (!template) return;
@@ -847,7 +954,7 @@ async function removeStock(symbol) {
 async function addAlert(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  const params = Object.fromEntries([...form.entries()].filter(([key]) => ["threshold", "short", "long", "signal", "period", "direction", "lookback", "window", "multiple"].includes(key)));
+  const params = Object.fromEntries([...form.entries()].filter(([key]) => ["threshold", "short", "long", "signal", "period", "direction", "lookback", "window", "multiple", "state", "pattern"].includes(key)));
   const payload = {
       symbol: $("#alertSymbol").value, type: $("#alertType").value, params,
       once_per_day: $("#oncePerDay").checked, cooldown_minutes: $("#cooldown").value,
@@ -890,6 +997,60 @@ async function testSourceRoute() {
   } catch (error) {
     result.textContent = `失败：${error.message}`;
     showError(`数据路由诊断失败：${error.message}`);
+  } finally { button.disabled = false; }
+}
+
+async function testHithinkRoute() {
+  const button = $("#hithinkTestButton");
+  const result = $("#sourceTestResult");
+  button.disabled = true;
+  result.textContent = "正在检测官方认证、快照和历史日K…";
+  try {
+    const body = await api("/api/hithink-test", { method: "POST", body: JSON.stringify({ symbol: app.selected }) });
+    if (body.passed) {
+      result.textContent = `同花顺官方 · ${body.latency_ms} ms · 报价 ${body.quote_count} / K线 ${body.bar_count}`;
+      toast("同花顺官方源诊断通过");
+    } else if (body.status === "not_configured") {
+      result.textContent = "未配置 HITHINK_FINANCE_API_KEY；当前继续使用公开源";
+    } else {
+      const code = body.code == null ? "" : ` code=${body.code}`;
+      const requestId = body.request_id ? ` · request_id=${body.request_id}` : "";
+      result.textContent = `官方源未通过：${body.message}${code}${requestId}`;
+    }
+    await loadHealth();
+  } catch (error) {
+    result.textContent = `诊断失败：${error.message}`;
+  } finally { button.disabled = false; }
+}
+
+async function testNotificationChannel() {
+  const button = $("#notificationTestButton");
+  const result = $("#sourceTestResult");
+  button.disabled = true;
+  result.textContent = "正在调用通知通道…";
+  try {
+    const body = await api("/api/notification-test", { method: "POST", body: "{}" });
+    if (body.delivered && body.channel === "windows") {
+      result.textContent = "Windows 通知请求已由系统接受；请查看右下角通知或通知中心";
+      toast("Windows 通知测试已发送");
+    } else if (body.browser_fallback) {
+      if (!("Notification" in window)) {
+        result.textContent = `${body.reason}；当前浏览器不支持 Notification API`;
+      } else {
+        let permission = Notification.permission;
+        if (permission === "default") permission = await Notification.requestPermission();
+        if (permission === "granted") {
+          new Notification("自主看盘台 · 通知测试", { body: "测试成功：浏览器通知通道可以调用。" });
+          result.textContent = "当前实例无 Windows 托盘，浏览器通知测试已发送";
+        } else {
+          result.textContent = `${body.reason}；浏览器通知权限为 ${permission}`;
+        }
+      }
+    } else {
+      result.textContent = `通知测试失败：${body.reason || "系统未接受通知请求"}`;
+    }
+  } catch (error) {
+    result.textContent = `通知测试失败：${error.message}`;
   } finally { button.disabled = false; }
 }
 
@@ -1153,6 +1314,8 @@ function bindEvents() {
   $("#refreshButton").addEventListener("click", () => refreshAll({ forceHistory: true }));
   $("#notificationButton").addEventListener("click", requestNotifications);
   $("#sourceTestButton").addEventListener("click", testSourceRoute);
+  $("#hithinkTestButton").addEventListener("click", testHithinkRoute);
+  $("#notificationTestButton").addEventListener("click", testNotificationChannel);
   $("#sourceSelect").addEventListener("change", (event) => saveSettings({ source: event.target.value }));
   $("#intervalSelect").addEventListener("change", (event) => saveSettings({ refresh_seconds: Number(event.target.value) }));
   $("#autoRefresh").addEventListener("change", (event) => saveSettings({ auto_refresh: event.target.checked }));

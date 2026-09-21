@@ -24,8 +24,9 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import urlopen
 
+from analysis import PATTERN_LABELS, analyze_market_snapshot, analyze_security
 from indicators import backtest_alert, enrich_bars, evaluate_alert
-from providers import (DataSourceError, company_overview, get_provider, market_overview,
+from providers import (DataSourceError, company_overview, diagnose_hithink, get_provider, market_breadth, market_overview,
                        normalize_symbol, provider_health, search_symbols, source_capabilities)
 from windows_desktop import IS_WINDOWS, SingleInstance, TrayController, open_dashboard_address, show_message
 
@@ -54,6 +55,7 @@ CACHE_LOCK = threading.Lock()
 EVALUATION_LOCK = threading.Lock()
 MONITOR_STATUS_LOCK = threading.Lock()
 DESKTOP_STATUS_LOCK = threading.Lock()
+NOTIFICATION_SENDER_LOCK = threading.Lock()
 LOGGER = logging.getLogger("marketdesk")
 STATE_VERSION = 4
 MAX_BACKUPS = 20
@@ -75,12 +77,14 @@ class LocalThreadingHTTPServer(ThreadingHTTPServer):
 _DESKTOP_STATUS: dict[str, Any] = {
     "tray_running": False,
     "native_notifications": False,
+    "tray_error": None,
     "single_instance": False,
     "windowed": FROZEN and IS_WINDOWS,
     "portable_mode": PORTABLE_MODE,
     "data_location": "application_folder",
     "log_file": "data/logs/app.log",
 }
+_NATIVE_NOTIFICATION_SENDER: Any = None
 
 DEFAULT_STATE: dict[str, Any] = {
     "schema_version": STATE_VERSION,
@@ -125,6 +129,50 @@ def _update_desktop_status(**changes: Any) -> None:
 def desktop_status() -> dict[str, Any]:
     with DESKTOP_STATUS_LOCK:
         return dict(_DESKTOP_STATUS)
+
+
+def set_native_notification_sender(sender: Any = None) -> None:
+    global _NATIVE_NOTIFICATION_SENDER
+    with NOTIFICATION_SENDER_LOCK:
+        _NATIVE_NOTIFICATION_SENDER = sender
+
+
+def test_notification_delivery() -> dict[str, Any]:
+    with NOTIFICATION_SENDER_LOCK:
+        sender = _NATIVE_NOTIFICATION_SENDER
+    tested_at = datetime.now(SHANGHAI).isoformat()
+    if sender is None:
+        return {
+            "delivered": False, "channel": "browser", "browser_fallback": True,
+            "reason": "当前实例未启用 Windows 托盘通知，请在浏览器中授权通知或正常双击 EXE 启动",
+            "tested_at": tested_at,
+        }
+    try:
+        delivered = bool(sender("自主看盘台 · 通知测试", "测试成功：预警通知通道可以调用。"))
+    except Exception as exc:
+        LOGGER.exception("Windows 通知测试异常")
+        return {
+            "delivered": False, "channel": "windows", "browser_fallback": False,
+            "reason": f"Windows 通知调用异常：{type(exc).__name__}", "tested_at": tested_at,
+        }
+    return {
+        "delivered": delivered, "channel": "windows", "browser_fallback": False,
+        "reason": None if delivered else "Windows Shell 未接受通知请求；请检查通知设置或安全软件",
+        "tested_at": tested_at,
+    }
+
+
+def activate_tray(controller: TrayController) -> bool:
+    if controller.start():
+        _update_desktop_status(tray_running=True, native_notifications=True, tray_error=None)
+        return True
+    LOGGER.warning("系统托盘不可用，继续以浏览器模式运行：%s", controller.failed or "未知错误")
+    _update_desktop_status(
+        tray_running=False,
+        native_notifications=False,
+        tray_error="系统托盘创建失败，已切换为浏览器通知模式",
+    )
+    return False
 
 
 def load_state_unlocked() -> dict[str, Any]:
@@ -552,6 +600,7 @@ def records_csv(records: list[dict[str, Any]]) -> bytes:
         "price_above": "价格高于", "price_below": "价格低于", "ma_cross": "均线穿越",
         "breakout": "区间突破", "volume_surge": "成交量放大", "rsi_threshold": "RSI 区域",
         "macd_cross": "MACD 金叉/死叉", "breakout_volume": "突破并放量",
+        "trend_state": "趋势状态", "candlestick_pattern": "K线形态",
     }
 
     def safe(value: Any) -> Any:
@@ -967,6 +1016,13 @@ class Handler(BaseHTTPRequestHandler):
                     "sources": sorted({item.get("source") for item in quotes + bars if item.get("source")}),
                     "tested_at": datetime.now(SHANGHAI).isoformat(),
                 })
+            elif parsed.path == "/api/hithink-test":
+                state = load_state()
+                default_symbol = state["watchlist"][0]["symbol"] if state["watchlist"] else "600519.SH"
+                symbol = normalize_symbol(str(payload.get("symbol") or default_symbol))
+                self.send_json({"ok": True, **diagnose_hithink(symbol), "tested_at": datetime.now(SHANGHAI).isoformat()})
+            elif parsed.path == "/api/notification-test":
+                self.send_json({"ok": True, **test_notification_delivery()})
             elif parsed.path == "/api/evaluate":
                 try:
                     result = evaluate_all()
@@ -1152,10 +1208,11 @@ class Handler(BaseHTTPRequestHandler):
                 "history", f"{symbol}:{limit}", lambda: provider.history(symbol, limit),
             )
             bars = enrich_bars(raw_bars[-limit:])
+            completed = completed_daily_bars(bars)
             sources = sorted({item.get("source") for item in bars if item.get("source")})
             self.send_json({
                 "ok": True, "symbol": symbol, "items": bars, "provider": provider.name, "sources": sources,
-                "adjust": "forward", "completed_items": len(completed_daily_bars(bars)),
+                "adjust": "forward", "completed_items": len(completed), "analysis": analyze_security(completed),
                 "data_status": data_status, "cached_at": cached_at, "warning": warning,
                 "fetched_at": datetime.now(SHANGHAI).isoformat(),
             })
@@ -1169,10 +1226,27 @@ class Handler(BaseHTTPRequestHandler):
                 "cached_at": cached_at, "warning": warning,
             })
         elif path == "/api/market-overview":
-            items, data_status, warning, cached_at = fetch_with_cache(
-                "market", "mainland-headline", market_overview,
-            )
-            self.send_json({"ok": True, "items": items, "data_status": data_status, "cached_at": cached_at, "warning": warning})
+            try:
+                items, data_status, warning, cached_at = fetch_with_cache(
+                    "market", "mainland-headline", market_overview,
+                )
+            except DataSourceError as exc:
+                items, data_status, warning, cached_at = [], "unavailable", str(exc), None
+            try:
+                breadth_items, breadth_status, breadth_warning, breadth_cached_at = fetch_with_cache(
+                    "market-breadth", "shanghai-shenzhen", market_breadth,
+                )
+                breadth = breadth_items[0] if breadth_items else {"available": False, "reason": "市场宽度返回为空"}
+            except DataSourceError as exc:
+                breadth = {"available": False, "reason": str(exc), "scope": "沪深两市"}
+                breadth_status, breadth_warning, breadth_cached_at = "unavailable", str(exc), None
+            self.send_json({
+                "ok": True, "items": items, "breadth": breadth,
+                "analysis": analyze_market_snapshot(items, breadth),
+                "data_status": data_status, "cached_at": cached_at, "warning": warning,
+                "breadth_status": breadth_status, "breadth_cached_at": breadth_cached_at,
+                "breadth_warning": breadth_warning,
+            })
         elif path == "/api/audit":
             self.send_json({
                 "ok": True, "items": filtered_audit(state, query),
@@ -1261,6 +1335,16 @@ def validate_alert(payload: dict[str, Any]) -> dict[str, Any]:
             "lookback": lookback, "direction": "low" if params.get("direction") == "low" else "high",
             "window": window, "multiple": multiple,
         }
+    elif kind == "trend_state":
+        state = str(params.get("state", "up"))
+        if state not in {"up", "down", "transition_up", "transition_down", "range"}:
+            raise ValueError("不支持的趋势状态")
+        params = {"state": state}
+    elif kind == "candlestick_pattern":
+        pattern = str(params.get("pattern", "doji"))
+        if pattern not in PATTERN_LABELS:
+            raise ValueError("不支持的K线形态")
+        params = {"pattern": pattern}
     else:
         raise ValueError("不支持的预警类型")
     return {"symbol": symbol, "type": kind, "params": params}
@@ -1373,14 +1457,10 @@ def main() -> None:
             on_exit=server.shutdown,
             portable_mode=PORTABLE_MODE,
         )
-        if not tray.start():
-            LOGGER.error("系统托盘不可用，程序停止")
-            server.server_close()
-            instance.release()
-            if FROZEN and IS_WINDOWS:
-                show_message("自主看盘台无法启动", "系统托盘创建失败，请查看 data\\logs\\app.log。", error=True)
-            return
-        _update_desktop_status(tray_running=True, native_notifications=True)
+        if not activate_tray(tray):
+            tray = None
+        else:
+            set_native_notification_sender(tray.show_notification)
 
     monitor.start()
     if not FROZEN:
@@ -1400,6 +1480,7 @@ def main() -> None:
         monitor.stop()
         if tray:
             tray.stop()
+        set_native_notification_sender(None)
         _update_desktop_status(tray_running=False, native_notifications=False)
         server.server_close()
         instance.release()

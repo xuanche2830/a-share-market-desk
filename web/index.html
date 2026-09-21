@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>自主看盘台</title>
-  <link rel="stylesheet" href="/styles.css?v=20260920a">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=20260920b">
 </head>
 <body>
   <header class="topbar">
@@ -80,7 +81,7 @@
         <details>
           <summary>查看数据源健康与口径</summary>
           <div id="sourceHealthList" class="source-health-list"></div>
-          <div class="health-actions"><button id="sourceTestButton" type="button">测试当前数据路由</button><span id="sourceTestResult" class="muted"></span></div>
+          <div class="health-actions"><button id="sourceTestButton" type="button">测试当前数据路由</button><button id="hithinkTestButton" type="button">检测同花顺官方源</button><button id="notificationTestButton" type="button">测试通知</button><span id="sourceTestResult" class="muted"></span></div>
           <p class="health-note"><span id="marketBasis">正在读取交易日历口径。</span> 缓存会明确标识，预警只使用本轮成功取得的实时数据。</p>
         </details>
       </section>
@@ -133,9 +134,30 @@
         <div><span>20 日区间</span><strong id="range20">—</strong></div>
         <div><span>量比（5日）</span><strong id="volumeRatio">—</strong></div>
       </section>
+      <section class="analysis-panel panel" aria-label="技术状态解释">
+        <div class="analysis-head">
+          <div><h3>技术状态解释</h3><span id="analysisMeta" class="muted">等待已完成日K</span></div>
+          <span id="analysisAttention" class="analysis-badge">等待判断</span>
+        </div>
+        <div class="analysis-hero">
+          <div><span>趋势状态</span><strong id="analysisTrend">—</strong><small id="analysisConfidence">—</small></div>
+          <div><span>最新K线</span><strong id="analysisCandle">—</strong><small id="analysisCandleDetail">—</small></div>
+          <div><span>20日关键位置</span><strong id="analysisLevels">—</strong><small>区间仅用于观察收盘是否突破</small></div>
+        </div>
+        <div class="reversal-status"><span>转折确认</span><strong id="analysisReversal">—</strong><small id="analysisReversalDetail">等待已完成日K</small></div>
+        <div class="analysis-columns">
+          <div><h4>当前信号</h4><div id="analysisSignals" class="analysis-list"><div class="empty">等待分析</div></div></div>
+          <div><h4>判断依据与冲突</h4><div id="analysisEvidence" class="analysis-list"><div class="empty">等待分析</div></div></div>
+          <div><h4>下一步观察</h4><div id="analysisSuggestions" class="analysis-list"><div class="empty">等待分析</div></div></div>
+        </div>
+        <div id="analysisActions" class="analysis-actions"></div>
+        <p class="health-note">这里的“建议”是观察和复核步骤，不是买入、卖出、持有建议，也不预测收益。趋势和形态都必须等待已完成日K，盘中价格变化不会提前改写结论。</p>
+      </section>
       <section class="context-panel panel">
         <div class="context-head"><div><h3>公司与市场背景</h3><span id="contextMeta" class="muted">等待加载</span></div></div>
         <div id="marketOverview" class="market-overview"><div class="empty">正在读取大盘指数</div></div>
+        <div id="marketBreadth" class="market-breadth"><div class="empty">正在读取沪深涨跌家数</div></div>
+        <div id="marketPulse" class="market-pulse"><strong>市场判断等待数据</strong><span>当前只覆盖主要指数快照</span></div>
         <div id="companyOverview" class="company-overview"><div class="empty">选择股票后显示公司公开信息</div></div>
         <p class="health-note">行业、地区、估值和市值来自公开数据字段，缺失时显示“—”。这些信息用于理解背景，不构成投资建议。</p>
       </section>
@@ -159,7 +181,7 @@
 
       <div id="rulesTab" class="tab-page active">
         <form id="alertForm" class="rule-form">
-          <div class="rule-templates"><span>快速模板</span><button type="button" data-rule-template="rsi_oversold">RSI 超卖</button><button type="button" data-rule-template="macd_golden">MACD 金叉</button><button type="button" data-rule-template="breakout_volume">突破放量</button></div>
+          <div class="rule-templates"><span>快速模板</span><button type="button" data-rule-template="rsi_oversold">RSI 超卖</button><button type="button" data-rule-template="macd_golden">MACD 金叉</button><button type="button" data-rule-template="breakout_volume">突破放量</button><button type="button" data-rule-template="trend_up">进入上升结构</button><button type="button" data-rule-template="bullish_engulfing">阳包阴</button></div>
           <label>监测股票<select id="alertSymbol" required></select></label>
           <label>预警类型
             <select id="alertType">
@@ -171,6 +193,8 @@
               <option value="rsi_threshold">RSI 区域</option>
               <option value="macd_cross">MACD 金叉/死叉</option>
               <option value="breakout_volume">突破并放量</option>
+              <option value="trend_state">趋势状态变化</option>
+              <option value="candlestick_pattern">K线形态出现</option>
             </select>
           </label>
           <div id="alertParams"></div>
@@ -182,7 +206,7 @@
           <div class="form-actions"><button id="alertSubmit" class="primary wide">添加预警</button><button id="cancelAlertEdit" class="hidden" type="button">取消编辑</button></div>
           <details class="rule-guide">
             <summary>这些规则如何工作</summary>
-            <p>价格规则观察最新价；均线、RSI、MACD、突破和成交量规则使用已完成日 K。RSI 在条件由未成立变为成立时提醒，MACD 只在最近两根 K 线间发生金叉或死叉时命中，组合规则要求突破与放量同时成立。规则是确定性条件，不判断涨跌概率。</p>
+            <p>价格规则观察最新价；均线、RSI、MACD、突破、成交量、趋势和K线形态规则使用已完成日 K。趋势状态按均线排列、MA20 斜率和收盘位置判断；形态按实体与影线比例判断。规则只在条件由未成立变为成立时提醒，不判断涨跌概率。</p>
           </details>
         </form>
         <div class="rule-filters"><select id="alertStockFilter"><option value="">全部股票</option></select><select id="alertTypeFilter"><option value="">全部规则</option></select></div>

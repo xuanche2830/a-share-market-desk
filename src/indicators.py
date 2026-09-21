@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from statistics import median
 from typing import Any, Iterable
 
+from analysis import PATTERN_LABELS, TREND_LABELS, analyze_security
+
 
 def moving_average(values: Iterable[float], window: int) -> list[float | None]:
     numbers = [float(value) for value in values]
@@ -125,7 +127,7 @@ def evaluate_alert(
         relation = label if active else f"未{label}"
         return Evaluation(active, active and not previous_active, value, threshold, f"最新价 {value:.2f} {relation} {threshold:.2f}")
 
-    if len(bars) < 3:
+    if len(bars) < 3 and kind not in {"trend_state", "candlestick_pattern"}:
         return Evaluation(False, False, None, None, "历史数据不足")
 
     if kind == "ma_cross":
@@ -229,6 +231,30 @@ def evaluate_alert(
         active = breakout.active and volume.active
         message = f"组合条件{'同时成立' if active else '未同时成立'}：{breakout.message}；{volume.message}"
         return Evaluation(active, active and not previous_active, volume.value, volume.threshold, message)
+
+    if kind in {"trend_state", "candlestick_pattern"}:
+        analysis = analyze_security(enrich_bars(bars))
+        if not analysis.get("available"):
+            return Evaluation(False, False, None, 1.0, "历史数据不足，暂时无法判断技术状态")
+        if kind == "trend_state":
+            target = str(params.get("state", "up"))
+            current = str(analysis.get("trend", {}).get("state", "insufficient"))
+            active = current == target
+            message = (
+                f"当前为{TREND_LABELS.get(current, current)}；"
+                f"目标为{TREND_LABELS.get(target, target)}。"
+                f"{analysis.get('trend', {}).get('invalidation', '')}"
+            )
+        else:
+            target = str(params.get("pattern", "doji"))
+            patterns = analysis.get("candle", {}).get("pattern_keys", [])
+            active = target in patterns
+            details = next(
+                (item.get("explanation") for item in analysis.get("candle", {}).get("patterns", []) if item.get("key") == target),
+                analysis.get("candle", {}).get("explanation", ""),
+            )
+            message = f"{PATTERN_LABELS.get(target, target)}{'已出现' if active else '未出现'}。{details}"
+        return Evaluation(active, active and not previous_active, 1.0 if active else 0.0, 1.0, message)
 
     return Evaluation(False, False, None, None, "不支持的预警类型")
 

@@ -22,6 +22,14 @@ class DataSourceError(RuntimeError):
     pass
 
 
+class HithinkApiError(DataSourceError):
+    def __init__(self, message: str, *, code: int | None = None, request_id: str | None = None, retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.request_id = request_id
+        self.retryable = retryable
+
+
 def normalize_symbol(raw: str) -> str:
     symbol = raw.strip().upper().replace(" ", "")
     if "." in symbol:
@@ -168,6 +176,62 @@ def market_overview() -> list[dict[str, Any]]:
             raise DataSourceError("腾讯大盘指数返回不完整")
         return items
     return _observed("tencent", fetch)
+
+
+def market_breadth() -> list[dict[str, Any]]:
+    """Return Shanghai/Shenzhen advance/decline breadth from public aggregate fields.
+
+    The upstream interface is unofficial.  Keep the scope explicit and never
+    silently interpret a zeroed non-trading response as a real flat market.
+    """
+    params = urllib.parse.urlencode({
+        "fltt": "2", "invt": "2", "pn": "1", "np": "1", "pz": "20", "dect": "1",
+        "fields": "f12,f14,f104,f105,f106", "secids": "1.000001,0.399001",
+    })
+
+    def fetch() -> list[dict[str, Any]]:
+        payload = _get_json(
+            f"https://push2.eastmoney.com/api/qt/ulist/get?{params}",
+            {"Referer": "https://quote.eastmoney.com/", "Accept-Language": "zh-CN,zh;q=0.9"},
+        )
+        data = payload.get("data")
+        rows = data.get("diff") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise DataSourceError("东方财富市场宽度缺少 data.diff 字段")
+        expected = {"000001", "399001"}
+        parsed: dict[str, dict[str, int]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("f12") or "")
+            if code not in expected:
+                continue
+            parsed[code] = {
+                "up": _integer(row.get("f104"), f"{code}.up") or 0,
+                "down": _integer(row.get("f105"), f"{code}.down") or 0,
+                "flat": _integer(row.get("f106"), f"{code}.flat") or 0,
+            }
+        if set(parsed) != expected:
+            raise DataSourceError("东方财富市场宽度未同时返回沪深两市")
+        up = sum(item["up"] for item in parsed.values())
+        down = sum(item["down"] for item in parsed.values())
+        flat = sum(item["flat"] for item in parsed.values())
+        total = up + down + flat
+        available = total > 0
+        return [{
+            "available": available,
+            "scope": "沪深两市",
+            "up": up,
+            "down": down,
+            "flat": flat,
+            "total": total,
+            "advance_ratio": round(up / (up + down) * 100, 2) if up + down else None,
+            "source": "eastmoney",
+            "fetched_at": _iso_now(),
+            "reason": None if available else "非交易时段或上游暂未提供涨跌家数",
+            "coverage_note": "按上证指数与深证成指的上游聚合字段合计，不含北交所。",
+        }]
+    return _observed("eastmoney", fetch)
 
 
 def _number(value: Any, field: str, *, required: bool = True, scale: float = 1.0) -> float | None:
@@ -511,17 +575,30 @@ class HithinkProvider(MarketProvider):
 
     def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         query = urllib.parse.urlencode(params)
-        payload = _get_json(f"{self.base_url}{path}?{query}", {"X-api-key": self.api_key})
-        if payload.get("code") != 0:
-            code = payload.get("code")
-            request_id = payload.get("request_id")
-            detail = payload.get("message") or f"业务错误 {code}"
+        last_error: HithinkApiError | None = None
+        for attempt in range(3):
+            payload = _get_json(f"{self.base_url}{path}?{query}", {"X-api-key": self.api_key})
+            raw_code = payload.get("code")
+            try:
+                code = int(raw_code)
+            except (TypeError, ValueError):
+                code = None
+            if code == 0:
+                data = payload.get("data")
+                if not isinstance(data, dict):
+                    raise DataSourceError("同花顺接口成功响应缺少 data 对象")
+                return data
+            request_id = str(payload.get("request_id") or "") or None
+            detail = str(payload.get("message") or f"业务错误 {raw_code}").replace(self.api_key, "[REDACTED]")
+            retryable = code == 4001 or code in {5001, 5002, 5003}
             suffix = f"（request_id: {request_id}）" if request_id else ""
-            raise DataSourceError(f"同花顺接口 {detail}{suffix}")
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            raise DataSourceError("同花顺接口成功响应缺少 data 对象")
-        return data
+            last_error = HithinkApiError(
+                f"同花顺接口 {detail}{suffix}", code=code, request_id=request_id, retryable=retryable,
+            )
+            if not retryable or attempt == 2:
+                raise last_error
+            time.sleep(0.3 * (2 ** attempt))
+        raise last_error or DataSourceError("同花顺接口请求失败")
 
     def quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         normalized = [normalize_symbol(symbol) for symbol in symbols]
@@ -583,6 +660,47 @@ class HithinkProvider(MarketProvider):
         if not bars:
             raise DataSourceError(f"同花顺未取得 {symbol} 的历史日线")
         return bars[-safe_limit:]
+
+
+def diagnose_hithink(symbol: str = "600519.SH") -> dict[str, Any]:
+    """Check the official route without exposing or persisting its API key."""
+    api_key = os.getenv("HITHINK_FINANCE_API_KEY", "").strip()
+    normalized = normalize_symbol(symbol)
+    base = {
+        "configured": bool(api_key),
+        "symbol": normalized,
+        "contract": "REST API / X-api-key / code == 0 / data.item",
+        "contract_checked_at": "2026-09-21",
+    }
+    if not api_key:
+        return {**base, "passed": False, "status": "not_configured", "message": "未检测到 HITHINK_FINANCE_API_KEY"}
+
+    provider = HithinkProvider(api_key)
+    started = time.perf_counter()
+    try:
+        quotes, bars = _observed(
+            "hithink",
+            lambda: (provider.quotes([normalized]), provider.history(normalized, 10)),
+        )
+    except HithinkApiError as exc:
+        return {
+            **base, "passed": False, "status": "api_error", "message": str(exc),
+            "code": exc.code, "request_id": exc.request_id, "retryable": exc.retryable,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        }
+    except DataSourceError as exc:
+        return {
+            **base, "passed": False, "status": "transport_or_contract_error", "message": str(exc),
+            "code": None, "request_id": None, "retryable": True,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        }
+    return {
+        **base, "passed": True, "status": "success", "message": "官方快照与前复权日K均通过",
+        "quote_count": len(quotes), "bar_count": len(bars),
+        "latest_quote_time": quotes[0].get("timestamp") if quotes else None,
+        "latest_bar_date": bars[-1].get("date") if bars else None,
+        "latency_ms": round((time.perf_counter() - started) * 1000),
+    }
 
 
 class AutoProvider(MarketProvider):

@@ -11,11 +11,14 @@ from providers import (
     DataSourceError,
     EastmoneyProvider,
     HithinkProvider,
+    HithinkApiError,
     PublicProvider,
     TencentProvider,
     company_overview,
+    diagnose_hithink,
     get_provider,
     market_overview,
+    market_breadth,
     search_symbols,
 )
 import providers
@@ -100,6 +103,37 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("request-2", message)
         self.assertNotIn("super-secret-key", message)
 
+    @patch("providers.time.sleep")
+    @patch("providers._get_json")
+    def test_hithink_retries_only_retryable_business_errors(self, get_json, _sleep):
+        get_json.side_effect = [
+            {"code": 4001, "message": "限流", "request_id": "retry-1", "data": None},
+            {"code": 0, "message": "success", "data": {"timestamp": 1, "item": [{
+                "thscode": "600519.SH", "ticker": "600519", "last_price": 10,
+            }]}},
+        ]
+        quote = HithinkProvider("secret").quotes(["600519.SH"])[0]
+        self.assertEqual(quote["price"], 10.0)
+        self.assertEqual(get_json.call_count, 2)
+        _sleep.assert_called_once()
+
+        get_json.reset_mock()
+        get_json.side_effect = None
+        get_json.return_value = {"code": 2003, "message": "无权限", "request_id": "deny-1", "data": None}
+        with self.assertRaises(HithinkApiError) as caught:
+            HithinkProvider("secret").quotes(["600519.SH"])
+        self.assertEqual(caught.exception.code, 2003)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(get_json.call_count, 1)
+
+    def test_hithink_diagnostic_without_key_is_explicit(self):
+        with patch.dict(os.environ, {}, clear=True):
+            result = diagnose_hithink("600519.SH")
+        self.assertFalse(result["configured"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["status"], "not_configured")
+        self.assertNotIn("secret", str(result).lower())
+
     def test_public_provider_falls_back_after_timeout(self):
         provider = PublicProvider()
         provider.tencent.quotes = Mock(side_effect=DataSourceError("timeout"))
@@ -178,6 +212,29 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(items), 3)
         self.assertEqual(items[0]["change_pct"], 0.94)
         self.assertEqual(items[2]["symbol"], "399006.SZ")
+
+    @patch("providers._get_json")
+    def test_market_breadth_combines_shanghai_and_shenzhen(self, get_json):
+        get_json.return_value = {"data": {"diff": [
+            {"f12": "000001", "f104": 1000, "f105": 800, "f106": 20},
+            {"f12": "399001", "f104": 1400, "f105": 900, "f106": 30},
+        ]}}
+        with patch("providers._observed", side_effect=lambda _source, operation: operation()):
+            item = market_breadth()[0]
+        self.assertTrue(item["available"])
+        self.assertEqual(item["up"], 2400)
+        self.assertEqual(item["down"], 1700)
+        self.assertAlmostEqual(item["advance_ratio"], 58.54)
+        self.assertIn("不含北交所", item["coverage_note"])
+
+    @patch("providers._get_json")
+    def test_market_breadth_rejects_partial_exchange_data(self, get_json):
+        get_json.return_value = {"data": {"diff": [
+            {"f12": "000001", "f104": 1000, "f105": 800, "f106": 20},
+        ]}}
+        with patch("providers._observed", side_effect=lambda _source, operation: operation()):
+            with self.assertRaisesRegex(DataSourceError, "未同时返回沪深两市"):
+                market_breadth()
 
 
 if __name__ == "__main__":
